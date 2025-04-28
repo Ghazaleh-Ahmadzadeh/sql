@@ -20,6 +20,14 @@ The `||` values concatenate the columns into strings.
 Edit the appropriate columns -- you're making two edits -- and the NULL rows will be fixed. 
 All the other rows will remain the same.) */
 
+SELECT 
+  product_name
+  || ', '
+  || COALESCE(product_size, '')
+  || ' ('
+  || COALESCE(product_qty_type, 'unit')
+  || ')' AS product_detail
+FROM product;
 
 
 --Windowed Functions
@@ -32,16 +40,57 @@ each new market date for each customer, or select only the unique market dates p
 (without purchase details) and number those visits. 
 HINT: One of these approaches uses ROW_NUMBER() and one uses DENSE_RANK(). */
 
+SELECT
+  customer_id,
+  market_date,
+  ROW_NUMBER() 
+    OVER (
+      PARTITION BY customer_id 
+      ORDER BY market_date
+    ) AS visit_number
+FROM customer_purchases;
 
 
 /* 2. Reverse the numbering of the query from a part so each customer’s most recent visit is labeled 1, 
 then write another query that uses this one as a subquery (or temp table) and filters the results to 
 only the customer’s most recent visit. */
 
+-- a) Number in reverse chronological order
+DROP TABLE IF EXISTS visits_rev;
+
+CREATE TEMP TABLE visits_rev AS
+SELECT
+  customer_id,
+  market_date,
+  ROW_NUMBER()
+    OVER (
+      PARTITION BY customer_id
+      ORDER BY market_date DESC
+    ) AS rev_visit_num
+FROM (
+  SELECT DISTINCT customer_id, market_date
+  FROM customer_purchases
+);
+
+
+-- b) Keep only the most recent (rev_visit_num = 1)
+SELECT
+  customer_id,
+  market_date
+FROM visits_rev
+WHERE rev_visit_num = 1;
 
 
 /* 3. Using a COUNT() window function, include a value along with each row of the 
 customer_purchases table that indicates how many different times that customer has purchased that product_id. */
+
+SELECT DISTINCT
+  customer_id,
+  product_id,
+  COUNT(*) OVER (
+    PARTITION BY customer_id, product_id
+  ) AS times_bought
+FROM customer_purchases;
 
 
 
@@ -57,10 +106,26 @@ Remove any trailing or leading whitespaces. Don't just use a case statement for 
 
 Hint: you might need to use INSTR(product_name,'-') to find the hyphens. INSTR will help split the column. */
 
+SELECT
+  product_name,
+  CASE
+    WHEN INSTR(product_name, '-') > 0
+    THEN TRIM(
+           SUBSTR(
+             product_name,
+             INSTR(product_name, '-') + 1
+           )
+         )
+    ELSE NULL
+  END AS description
+FROM product;
 
 
 /* 2. Filter the query to show any product_size value that contain a number with REGEXP. */
 
+SELECT *
+FROM product
+WHERE product_size REGEXP '[0-9]';
 
 
 -- UNION
@@ -72,6 +137,39 @@ HINT: There are a possibly a few ways to do this query, but if you're struggling
 "best day" and "worst day"; 
 3) Query the second temp table twice, once for the best day, once for the worst day, 
 with a UNION binding them. */
+
+DROP TABLE IF EXISTS daily_sales;
+DROP TABLE IF EXISTS ranked;
+CREATE TEMP TABLE daily_sales AS
+SELECT
+  market_date,
+  SUM(quantity * cost_to_customer_per_qty) AS total_sales
+FROM customer_purchases
+GROUP BY market_date;
+
+CREATE TEMP TABLE ranked AS
+SELECT
+  market_date,
+  total_sales,
+  RANK() OVER (ORDER BY total_sales DESC) AS rk_desc,
+  RANK() OVER (ORDER BY total_sales ASC)  AS rk_asc
+FROM daily_sales;
+
+SELECT
+  market_date,
+  total_sales,
+  'highest' AS tag
+FROM ranked
+WHERE rk_desc = 1
+
+UNION ALL
+
+SELECT
+  market_date,
+  total_sales,
+  'lowest' AS tag
+FROM ranked
+WHERE rk_asc = 1;
 
 
 
@@ -89,6 +187,27 @@ Think a bit about the row counts: how many distinct vendors, product names are t
 How many customers are there (y). 
 Before your final group by you should have the product of those two queries (x*y).  */
 
+-- 1. Precompute the number of customers
+WITH customer_count AS (
+  SELECT COUNT(*) AS cnt
+  FROM customer
+)
+
+-- 2. Multiply unit_price × 5 units × total customers
+SELECT
+  v.vendor_name,
+  p.product_name,
+  vi.unit_price
+    * 5
+    * cc.cnt             AS potential_revenue
+FROM vendor_inventory AS vi
+JOIN vendor AS v
+  ON vi.vendor_id = v.vendor_id
+JOIN product AS p
+  ON vi.product_id = p.product_id
+CROSS JOIN customer_count AS cc  -- just one‐row table with customer count
+ORDER BY v.vendor_name, p.product_name;
+
 
 
 -- INSERT
@@ -97,17 +216,43 @@ This table will contain only products where the `product_qty_type = 'unit'`.
 It should use all of the columns from the product table, as well as a new column for the `CURRENT_TIMESTAMP`.  
 Name the timestamp column `snapshot_timestamp`. */
 
+CREATE TABLE product_units AS
+SELECT
+  *,
+  CURRENT_TIMESTAMP AS snapshot_timestamp
+FROM product
+WHERE product_qty_type = 'unit';
 
 
 /*2. Using `INSERT`, add a new row to the product_units table (with an updated timestamp). 
 This can be any product you desire (e.g. add another record for Apple Pie). */
 
+INSERT INTO product_units
+  (product_id,
+   product_name,
+   product_size,
+   product_category_id,
+   product_qty_type,
+   snapshot_timestamp)
+VALUES
+  (999,
+   'Jack’s Special Pie',
+   '1 slice',
+   1,        
+   'unit',
+   CURRENT_TIMESTAMP);
 
 
 -- DELETE
 /* 1. Delete the older record for the whatever product you added. 
 
 HINT: If you don't specify a WHERE clause, you are going to have a bad time.*/
+
+DELETE FROM product_units
+WHERE snapshot_timestamp = (
+  SELECT MAX(snapshot_timestamp)
+  FROM product_units
+);
 
 
 
@@ -127,6 +272,24 @@ Third, SET current_quantity = (...your select statement...), remembering that WH
 Finally, make sure you have a WHERE statement to update the right row, 
 	you'll need to use product_units.product_id to refer to the correct row within the product_units table. 
 When you have all of these components, you can run the update statement. */
+
+ALTER TABLE product_units
+ADD COLUMN current_quantity INT;
+
+UPDATE product_units
+SET current_quantity = COALESCE(
+  (
+    SELECT vi.quantity
+    FROM vendor_inventory AS vi
+    WHERE vi.product_id = product_units.product_id
+      AND vi.market_date = (
+        SELECT MAX(market_date)
+        FROM vendor_inventory
+        WHERE product_id = product_units.product_id
+      )
+  ),
+  0  
+);
 
 
 
