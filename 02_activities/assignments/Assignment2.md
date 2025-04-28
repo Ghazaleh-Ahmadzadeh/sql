@@ -54,7 +54,17 @@ The store wants to keep customer addresses. Propose two architectures for the CU
 **HINT:** search type 1 vs type 2 slowly changing dimensions. 
 
 ```
-Your answer...
+Architecture A (Type 1 SCD – Overwrite Model)
+Maintain a single CUSTOMER_ADDRESS table keyed by customer_id. Whenever a customer updates their address, you simply run an UPDATE on that one row, replacing all address fields (street, city, postal code, etc.) with the new values. This keeps the table small and always reflects only the customer’s current address, but no prior locations are preserved.
+
+Architecture B (Type 2 SCD – History-Tracking Model)
+Use a richer CUSTOMER_ADDRESS table with its own surrogate key plus columns effective_date, expiration_date, and a boolean current_flag. Each time a customer moves, you:
+
+Expire the existing “current” record (set its expiration_date to today and flip current_flag to false).
+
+Insert a brand-new row with the updated address, effective_date = today, expiration_date = NULL, and current_flag = true.
+
+This structure preserves the full history of every address change—allowing you to report not just where customers live now, but where they lived at any point in the past.
 ```
 
 ***
